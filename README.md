@@ -438,7 +438,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Issues**: [GitHub Issues](https://github.com/yourusername/universal-openai-bridge/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/yourusername/universal-openai-bridge/discussions)
 - **Discord**: [Cheshire Cat AI Discord](https://discord.gg/bHX5sNFCYU)
-- **Email**: your.email@example.com
 
 ---
 
