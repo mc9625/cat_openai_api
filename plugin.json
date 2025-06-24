@@ -1,5 +1,5 @@
 {
-    "name": "OpenAI Bridge",
+    "name": "Universal OpenAI Bridge",
     "version": "1.0.0",
     "description": "Universal plugin that exposes OpenAI-compatible API endpoints for any application that needs to interact with Cheshire Cat using standard OpenAI API formats. Includes conversation memory, rate limiting, and comprehensive metrics.",
     "author_name": "NuvolaProject",
