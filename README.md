@@ -45,7 +45,7 @@ A comprehensive plugin that provides **real OpenAI-compatible API endpoints** fo
    # Go to Plugins > Plugin Registry > Search "Universal OpenAI Bridge"
    
    # Option 2: Manual Installation
-   git clone https://github.com/yourusername/universal-openai-bridge.git
+   git clone https://github.com/mc9625/cat_openai_api.git
    # Copy to your Cat's plugins folder
    ```
 
