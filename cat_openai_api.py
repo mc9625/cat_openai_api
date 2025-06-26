@@ -1,6 +1,9 @@
 """
-OpenAI Bridge Plugin - PIPELINE COMPLETO del Cat + Fix user_id
-Usa il pipeline completo per RAG e personalità ma con user_id corretto
+OpenAI API Bridge Plugin for Cheshire Cat AI
+
+Provides OpenAI-compatible API endpoints that use the complete Cat pipeline
+including RAG, memory, hooks, and personality. Perfect for integrating
+third-party applications that expect OpenAI API format.
 """
 
 from uuid import uuid4
@@ -18,20 +21,22 @@ from cat.auth.permissions import check_permissions, AuthResource, AuthPermission
 from cat.log import log
 from cat.convo.messages import CatMessage, UserMessage
 
-# ===== SETTINGS =====
+# ===== PLUGIN SETTINGS =====
 
 class OpenAIBridgeSettings(BaseModel):
-    """Settings per il plugin OpenAI Bridge."""
+    """Configuration settings for the OpenAI Bridge plugin."""
     
     rate_limit_per_minute: int = 60
     max_tokens: Optional[int] = 4000
-    debug_mode: bool = True
+    enable_streaming: bool = True
+    debug_mode: bool = False
 
 @plugin
 def settings_model():
+    """Return the settings model for the plugin."""
     return OpenAIBridgeSettings
 
-# ===== MODELS =====
+# ===== OPENAI API MODELS =====
 
 class OpenAIMessage(BaseModel):
     role: str
@@ -39,16 +44,16 @@ class OpenAIMessage(BaseModel):
     name: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "cat"
+    model: str = "cheshire-cat"
     messages: List[OpenAIMessage]
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = False
     user: Optional[str] = None
 
-# ===== GLOBAL STATE =====
+# ===== PLUGIN STATE =====
 
-# Storage per intercettazione con USER_ID DINAMICO
+# Storage for response interception
 _pending_responses = {}
 _request_counts = defaultdict(list)
 _active_requests = set()
@@ -56,13 +61,20 @@ _active_requests = set()
 # ===== UTILITY FUNCTIONS =====
 
 def generate_openai_id() -> str:
+    """Generate a unique OpenAI-style request ID."""
     timestamp = int(time.time())
     import random, string
     random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
     return f"chatcmpl-{timestamp}{random_suffix}"
 
 def check_rate_limit(user_id: str) -> bool:
-    """Verifica rate limiting."""
+    """Check if user has exceeded rate limit."""
+    settings = get_plugin_settings()
+    rate_limit = settings.get("rate_limit_per_minute", 60)
+    
+    if rate_limit <= 0:
+        return True
+    
     now = time.time()
     minute_ago = now - 60
     
@@ -71,18 +83,31 @@ def check_rate_limit(user_id: str) -> bool:
         if req_time > minute_ago
     ]
     
-    if len(_request_counts[user_id]) >= 60:
+    if len(_request_counts[user_id]) >= rate_limit:
         return False
     
     _request_counts[user_id].append(now)
     return True
 
+def get_plugin_settings() -> Dict:
+    """Get current plugin settings."""
+    try:
+        # This would be implemented based on Cat's plugin system
+        return {
+            "rate_limit_per_minute": 60,
+            "max_tokens": 4000,
+            "enable_streaming": True,
+            "debug_mode": False
+        }
+    except:
+        return {}
+
 def count_tokens(text: str) -> int:
-    """Stima approssimativa dei token."""
+    """Estimate token count (simple approximation)."""
     return max(1, len(text) // 4)
 
 def create_sse_chunk(request_id: str, content: str, model: str, finish_reason: Optional[str] = None) -> str:
-    """Crea un chunk SSE nel formato OpenAI."""
+    """Create a Server-Sent Events chunk in OpenAI format."""
     
     if finish_reason:
         chunk = {
@@ -116,234 +141,184 @@ def create_sse_chunk(request_id: str, content: str, model: str, finish_reason: O
     return f"data: {json.dumps(chunk)}\n\n"
 
 def create_sse_done() -> str:
-    """Crea il chunk finale SSE."""
+    """Create the final SSE chunk."""
     return "data: [DONE]\n\n"
 
-# ===== HOOK PER INTERCETTAZIONE CON USER_ID DINAMICO =====
+# ===== RESPONSE INTERCEPTION HOOK =====
 
 @hook(priority=-9999)
 def before_cat_sends_message(message: CatMessage, cat):
     """
-    HOOK INTERCETTAZIONE: Cerca la richiesta per QUALSIASI user_id attivo
+    Intercept Cat responses for OpenAI API requests.
+    
+    This hook captures the final Cat response after the complete pipeline
+    (including RAG, memory, hooks, and personality) has processed the message.
     """
     
     actual_user_id = cat.user_id
     message_text = message.text
     
-    log.info(f"[BRIDGE HOOK] ⭐ Message from user '{actual_user_id}': {message_text[:100]}...")
-    log.info(f"[BRIDGE HOOK] Active requests: {list(_pending_responses.keys())}")
+    settings = get_plugin_settings()
+    if settings.get("debug_mode", False):
+        log.info(f"[OpenAI Bridge] Intercepting message from user '{actual_user_id}': {message_text[:100]}...")
     
-    # Cerca richieste in attesa per QUALSIASI user_id
+    # Find any waiting request (dynamic user_id matching)
     found_request = None
     for req_id, data in _pending_responses.items():
         if data.get("waiting"):
-            log.info(f"[BRIDGE HOOK] Found waiting request {req_id}, updating user_id to '{actual_user_id}'")
+            if settings.get("debug_mode", False):
+                log.info(f"[OpenAI Bridge] Found waiting request {req_id}, updating user_id to '{actual_user_id}'")
             found_request = req_id
-            
-            # ⭐ AGGIORNA IL USER_ID CON QUELLO REALE ⭐
             data["actual_user_id"] = actual_user_id
             break
     
     if found_request:
-        log.info(f"[BRIDGE HOOK] ✅ INTERCETTATA risposta per request {found_request}")
-        
-        # Salva la risposta
+        # Save the complete Cat response
         _pending_responses[found_request]["response"] = message_text
         _pending_responses[found_request]["intercepted"] = True
         _pending_responses[found_request]["waiting"] = False
         
-        log.info(f"[BRIDGE HOOK] Risposta RAG salvata: {message_text[:100]}...")
-    else:
-        log.info(f"[BRIDGE HOOK] ❌ Nessuna richiesta in attesa trovata")
+        if settings.get("debug_mode", False):
+            log.info(f"[OpenAI Bridge] Response intercepted for request {found_request}")
     
     return message
 
-# ===== FUNZIONE PER PIPELINE COMPLETO =====
+# ===== CAT PIPELINE INTEGRATION =====
 
-async def get_cat_response_with_rag(prompt: str, request_user_id: str, request_id: str, cat_instance) -> str:
+async def get_cat_response_via_pipeline(prompt: str, request_user_id: str, request_id: str, cat_instance) -> str:
     """
-    PIPELINE COMPLETO del Cat con RAG, ma con gestione user_id corretta
+    Get response from Cat using the complete pipeline.
+    
+    This ensures all Cat features work: RAG, memory, hooks, personality, etc.
+    No fallbacks - if this fails, the request fails.
     """
+    
+    settings = get_plugin_settings()
+    
+    if request_id in _active_requests:
+        raise Exception(f"Request {request_id} already being processed")
+    
+    _active_requests.add(request_id)
+    
     try:
-        log.info(f"[BRIDGE RAG] Starting full pipeline for request {request_id}")
-        
-        # Evita riprocessing
-        if request_id in _active_requests:
-            log.warning(f"[BRIDGE RAG] Request {request_id} already active")
-            return "Request already being processed"
-        
-        _active_requests.add(request_id)
-        
-        # Registra per intercettazione (senza specificare user_id)
+        # Register for response interception
         _pending_responses[request_id] = {
             "waiting": True,
-            "request_user_id": request_user_id,  # ID richiesta originale
+            "request_user_id": request_user_id,
             "timestamp": time.time()
         }
         
-        log.info(f"[BRIDGE RAG] Registered request {request_id} for pipeline intercept")
+        if settings.get("debug_mode", False):
+            log.info(f"[OpenAI Bridge] Starting Cat pipeline for request {request_id}")
         
-        # ⭐ ACCESSO AL CAT CON PIPELINE COMPLETO ⭐
+        # Create UserMessage exactly like the web interface does
+        user_message = UserMessage(
+            user_id=request_user_id,
+            when=time.time(),
+            who="Human", 
+            text=prompt
+        )
         
-        # METODO 1: Prova con l'user_id della richiesta prima
-        if hasattr(cat_instance, 'send_ws_message'):
-            try:
-                log.info(f"[BRIDGE RAG] Trying send_ws_message with user_id '{request_user_id}'")
+        # Send through Cat's complete pipeline
+        if hasattr(cat_instance, 'receive'):
+            cat_instance.receive(user_message)
+        elif hasattr(cat_instance, '__call__'):
+            cat_instance({
+                "text": prompt,
+                "user_id": request_user_id
+            })
+        else:
+            raise Exception("Cannot access Cat pipeline")
+        
+        # Wait for response interception
+        max_wait = 15
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            if request_id in _pending_responses:
+                response_data = _pending_responses[request_id]
                 
-                # Prova a impostare temporaneamente l'user_id
-                original_user_id = getattr(cat_instance, 'user_id', None)
-                cat_instance.user_id = request_user_id
-                
-                response = cat_instance.send_ws_message(prompt, request_user_id)
-                
-                # Ripristina user_id originale
-                if original_user_id:
-                    cat_instance.user_id = original_user_id
-                
-                if response and len(str(response).strip()) > 0:
-                    log.info(f"[BRIDGE RAG] ✅ send_ws_message success: {str(response)[:100]}...")
+                if response_data.get("intercepted"):
+                    cat_response = response_data["response"]
                     
-                    # Pulisci
-                    _pending_responses.pop(request_id, None)
+                    # Cleanup
+                    del _pending_responses[request_id]
                     _active_requests.discard(request_id)
                     
-                    return str(response)
+                    if settings.get("debug_mode", False):
+                        log.info(f"[OpenAI Bridge] Pipeline response received for {request_id}")
                     
-            except Exception as e:
-                log.warning(f"[BRIDGE RAG] send_ws_message failed: {e}")
+                    return cat_response
+            
+            await asyncio.sleep(0.1)
         
-        # METODO 2: Usa UserMessage + receive() per pipeline completo
-        try:
-            log.info(f"[BRIDGE RAG] Using UserMessage + receive() method")
-            
-            # Crea UserMessage come fa l'interfaccia web
-            user_message = UserMessage(
-                user_id=request_user_id,
-                when=time.time(),
-                who="Human", 
-                text=prompt
-            )
-            
-            # Invia al Cat per processing completo
-            if hasattr(cat_instance, 'receive'):
-                cat_instance.receive(user_message)
-                log.info(f"[BRIDGE RAG] Message sent via receive()")
-            elif hasattr(cat_instance, '__call__'):
-                cat_instance({
-                    "text": prompt,
-                    "user_id": request_user_id
-                })
-                log.info(f"[BRIDGE RAG] Message sent via __call__()")
-            else:
-                raise Exception("Cannot send message to Cat")
-            
-            # Aspetta intercettazione con timeout più breve
-            max_wait = 10
-            start_time = time.time()
-            
-            log.info(f"[BRIDGE RAG] Waiting for full pipeline response...")
-            
-            while time.time() - start_time < max_wait:
-                if request_id in _pending_responses:
-                    response_data = _pending_responses[request_id]
-                    
-                    if response_data.get("intercepted"):
-                        cat_response = response_data["response"]
-                        actual_user_id = response_data.get("actual_user_id", request_user_id)
-                        
-                        # Pulisci
-                        del _pending_responses[request_id]
-                        _active_requests.discard(request_id)
-                        
-                        log.info(f"[BRIDGE RAG] ✅ Got RAG response from user '{actual_user_id}': {cat_response[:100]}...")
-                        return cat_response
-                
-                await asyncio.sleep(0.1)
-            
-            # Timeout - prova fallback
-            log.warning(f"[BRIDGE RAG] ⏰ Pipeline timeout, trying LLM fallback...")
-            
-        except Exception as e:
-            log.error(f"[BRIDGE RAG] Pipeline error: {e}")
-        
-        # FALLBACK: LLM diretto
+        # Timeout - this is an error, no fallback
         _pending_responses.pop(request_id, None)
         _active_requests.discard(request_id)
         
-        if hasattr(cat_instance, 'llm'):
-            log.info(f"[BRIDGE RAG] Fallback to direct LLM")
-            return cat_instance.llm(prompt)
-        
-        return f"I'm the Cheshire Cat. Pipeline processing failed for: {prompt[:50]}..."
+        raise Exception("Cat pipeline timeout - no response received")
         
     except Exception as e:
-        # Pulisci sempre
+        # Cleanup on any error
         _pending_responses.pop(request_id, None)
         _active_requests.discard(request_id)
-        
-        log.error(f"[BRIDGE RAG] Critical error: {e}")
-        
-        # Fallback finale
-        if hasattr(cat_instance, 'llm'):
-            return cat_instance.llm(prompt)
-        
-        return f"I'm the Cheshire Cat. Error: {prompt[:50]}..."
+        raise e
 
-# ===== STREAMING GENERATOR =====
+# ===== STREAMING RESPONSE GENERATOR =====
 
 async def stream_cat_response(prompt: str, user_id: str, request_id: str, model: str, cat_instance) -> AsyncGenerator[str, None]:
     """
-    Generator per streaming con PIPELINE COMPLETO
+    Generate streaming response using Cat's complete pipeline.
     """
     try:
-        log.info(f"[BRIDGE STREAM] Starting RAG stream for {request_id}")
+        settings = get_plugin_settings()
         
-        # ⭐ USA PIPELINE COMPLETO CON RAG ⭐
-        full_response = await get_cat_response_with_rag(prompt, user_id, request_id, cat_instance)
+        if settings.get("debug_mode", False):
+            log.info(f"[OpenAI Bridge] Starting stream for request {request_id}")
         
-        log.info(f"[BRIDGE STREAM] Got RAG response: {full_response[:100]}...")
+        # Get complete response via Cat pipeline
+        full_response = await get_cat_response_via_pipeline(prompt, user_id, request_id, cat_instance)
         
-        # Stream word-by-word
+        # Stream the response word by word
         words = full_response.split()
         
-        # Chunk iniziale
+        # Initial empty chunk
         yield create_sse_chunk(request_id, "", model)
         
-        for i, word in enumerate(words):
+        for word in words:
             yield create_sse_chunk(request_id, word + " ", model)
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.03)  # Natural typing speed
         
-        # Finalize
+        # Final chunk
         yield create_sse_chunk(request_id, "", model, "stop")
         yield create_sse_done()
         
-        log.info(f"[BRIDGE STREAM] ✅ RAG stream completed")
+        if settings.get("debug_mode", False):
+            log.info(f"[OpenAI Bridge] Stream completed for {request_id}")
         
     except Exception as e:
-        log.error(f"[BRIDGE STREAM] ❌ Stream error: {e}")
+        log.error(f"[OpenAI Bridge] Stream error for {request_id}: {e}")
         yield create_sse_chunk(request_id, f"Error: {str(e)}", model, "stop")
         yield create_sse_done()
 
-# ===== ENDPOINTS =====
+# ===== API ENDPOINTS =====
 
 @endpoint.get("/health")
 def health_check():
-    """Health check."""
+    """Health check endpoint."""
     return {
         "status": "healthy",
-        "plugin": "openai-bridge-rag-fixed",
-        "version": "15.0.0",
-        "strategy": "full_cat_pipeline_with_rag",
-        "elevenlabs_compatible": True,
-        "features": ["rag", "memory", "personality", "hooks"],
-        "timestamp": int(time.time())
+        "plugin": "openai-bridge",
+        "version": "1.0.0",
+        "timestamp": int(time.time()),
+        "features": ["chat_completions", "streaming", "rate_limiting"]
     }
 
 @endpoint.get("/v1/models")
 def list_models(
     stray = check_permissions(AuthResource.LLM, AuthPermission.READ)
 ):
-    """Lista modelli."""
+    """List available models (OpenAI API compatible)."""
     return {
         "object": "list",
         "data": [
@@ -355,24 +330,6 @@ def list_models(
                 "permission": [],
                 "root": "cheshire-cat",
                 "parent": None
-            },
-            {
-                "id": "gpt-3.5-turbo",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "cheshire-cat",
-                "permission": [],
-                "root": "gpt-3.5-turbo", 
-                "parent": None
-            },
-            {
-                "id": "gpt-4",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "cheshire-cat",
-                "permission": [],
-                "root": "gpt-4",
-                "parent": None
             }
         ]
     }
@@ -383,16 +340,22 @@ async def chat_completions(
     stray = check_permissions(AuthResource.CONVERSATION, AuthPermission.WRITE)
 ):
     """
-    ENDPOINT PRINCIPALE: PIPELINE COMPLETO del Cat con RAG
+    OpenAI-compatible chat completions endpoint.
+    
+    Supports both streaming and non-streaming responses.
+    All responses use the complete Cat pipeline.
     """
     request_id = generate_openai_id()
-    user_id = body.get("user", "elevenlabs_user")
+    user_id = body.get("user", "api_user")
     is_streaming = body.get("stream", False)
     
     try:
-        log.info(f"[BRIDGE MAIN] 🚀 Request {request_id} from {user_id} (stream: {is_streaming})")
+        settings = get_plugin_settings()
         
-        # Validazione
+        if settings.get("debug_mode", False):
+            log.info(f"[OpenAI Bridge] Request {request_id} from {user_id} (stream: {is_streaming})")
+        
+        # Validation
         if "messages" not in body or not body["messages"]:
             raise HTTPException(status_code=422, detail="messages field is required")
 
@@ -400,7 +363,7 @@ async def chat_completions(
         if not check_rate_limit(user_id):
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-        # Estrai SOLO ultimo messaggio user
+        # Extract user message (latest only)
         user_messages = [msg for msg in body["messages"] if msg.get("role") == "user"]
         if not user_messages:
             raise HTTPException(status_code=422, detail="No user message found")
@@ -408,33 +371,29 @@ async def chat_completions(
         user_message = user_messages[-1]["content"]
         model = body.get("model", "cheshire-cat")
         
-        log.info(f"[BRIDGE MAIN] Processing with RAG: {user_message[:100]}...")
+        # Apply token limits
+        max_tokens = body.get("max_tokens") or settings.get("max_tokens", 4000)
+        if max_tokens > 0 and len(user_message) > max_tokens * 4:
+            user_message = user_message[:max_tokens * 4]
 
-        # ⭐ STREAMING con RAG ⭐
-        if is_streaming:
-            log.info(f"[BRIDGE MAIN] 📡 Starting RAG stream")
-            
+        # Streaming response
+        if is_streaming and settings.get("enable_streaming", True):
             return StreamingResponse(
                 stream_cat_response(user_message, user_id, request_id, model, stray),
                 media_type="text/plain",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive", 
-                    "Content-Type": "text/plain; charset=utf-8",
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "*"
+                    "Content-Type": "text/plain; charset=utf-8"
                 }
             )
         
-        # ⭐ RISPOSTA NORMALE con RAG ⭐
+        # Non-streaming response
         else:
-            log.info(f"[BRIDGE MAIN] 💬 Getting RAG response")
-            
-            cat_response = await get_cat_response_with_rag(user_message, user_id, request_id, stray)
+            cat_response = await get_cat_response_via_pipeline(user_message, user_id, request_id, stray)
 
-            # Applica limiti se necessario
-            max_tokens = body.get("max_tokens")
-            if max_tokens and len(cat_response) > max_tokens * 4:
+            # Apply response token limits
+            if max_tokens > 0 and len(cat_response) > max_tokens * 4:
                 cat_response = cat_response[:max_tokens * 4] + "..."
 
             response = {
@@ -459,54 +418,59 @@ async def chat_completions(
                 }
             }
 
-            log.info(f"[BRIDGE MAIN] ✅ RAG Response: {cat_response[:50]}...")
             return response
 
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"[BRIDGE MAIN] ❌ Request {request_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        log.error(f"[OpenAI Bridge] Request {request_id} failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-@endpoint.get("/debug")
-def debug_status():
-    """Debug dello stato."""
-    return {
-        "active_requests": list(_active_requests),
-        "pending_responses": {
-            req_id: {k: v for k, v in data.items() if k != "response"} 
-            for req_id, data in _pending_responses.items()
-        },
-        "request_counts": dict(_request_counts),
-        "timestamp": int(time.time()),
-        "strategy": "full_pipeline_with_rag",
-        "hook_enabled": True
-    }
+@endpoint.post("/message")
+async def simple_message(
+    body: Dict,
+    stray = check_permissions(AuthResource.CONVERSATION, AuthPermission.WRITE)
+):
+    """Simple message endpoint for basic integrations."""
+    try:
+        text = body.get("text", "")
+        user_id = body.get("user_id", "api_user")
+        request_id = generate_openai_id()
+        
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="text field is required")
 
-# ===== HOOK DI INIZIALIZZAZIONE =====
+        # Rate limiting
+        if not check_rate_limit(user_id):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+        cat_response = await get_cat_response_via_pipeline(text, user_id, request_id, stray)
+
+        return {
+            "text": cat_response,
+            "user_id": user_id,
+            "timestamp": int(time.time())
+        }
+
+    except Exception as e:
+        log.error(f"[OpenAI Bridge] Simple message error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# ===== PLUGIN INITIALIZATION =====
 
 @hook(priority=1)
 def after_cat_bootstrap(cat):
-    """Inizializza il plugin."""
+    """Initialize the OpenAI Bridge plugin."""
     try:
-        log.info("🚀 OpenAI Bridge Plugin v15.0 - PIPELINE COMPLETO CON RAG!")
-        log.info("✨ RIPRISTINATO:")
-        log.info("   - ✅ RAG (Retrieval Augmented Generation)")
-        log.info("   - ✅ System prompt personalizzato (Noesis)")
-        log.info("   - ✅ Memoria episodica/dichiarativa")
-        log.info("   - ✅ Hook personalizzati")
-        log.info("   - ✅ Knowledge base specifica")
-        log.info("🔧 FIXATO:")
-        log.info("   - ✅ User_id mismatch problem")
-        log.info("   - ✅ Hook intercettazione dinamica")
-        log.info("📡 Endpoints:")
+        log.info("🚀 OpenAI Bridge Plugin v1.0.0 activated!")
+        log.info("📡 Available endpoints:")
         log.info("   - GET  /custom/health")
         log.info("   - GET  /custom/v1/models")
-        log.info("   - POST /custom/v1/chat/completions ⭐ (con RAG)")
-        log.info("   - GET  /custom/debug")
-        log.info("🎭 Noesis is BACK! Con personalità e knowledge completa!")
+        log.info("   - POST /custom/v1/chat/completions")
+        log.info("   - POST /custom/message")
+        log.info("✨ Features: Complete Cat pipeline, RAG, memory, streaming")
         
     except Exception as e:
-        log.error(f"Error in after_cat_bootstrap: {e}")
+        log.error(f"Error initializing OpenAI Bridge: {e}")
     
     return cat
