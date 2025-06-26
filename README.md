@@ -22,7 +22,7 @@ A comprehensive plugin that provides OpenAI-compatible API endpoints for Cheshir
 1. Download or clone this plugin into your Cat's `plugins` directory:
    ```bash
    cd /path/to/cheshire-cat/plugins
-   git clone https://github.com/yourusername/cat-openai-bridge.git
+   git clone https://github.com/mc9625/cat_openai_api.git
    ```
 
 2. Restart your Cheshire Cat instance
